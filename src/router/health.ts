@@ -47,7 +47,7 @@ export function splitModelRef(model: string): { providerId: string; modelId: str
 }
 
 export interface HealthResolver {
-  /** Health of a tier's primary model: "down" only on a refused/timeout probe or an absent model id. */
+  /** Health of a tier's primary model: "down" on a refused/timeout probe, a non-2xx response, or an absent model id. */
   tierHealth(model: string): Promise<TierHealth>;
   /**
    * The tier to dispatch on, starting at `requested` and escalating up `ladder`
@@ -123,7 +123,10 @@ export function createHealthResolver(deps: HealthResolverDeps): HealthResolver {
     const result = await probe(ep.baseURL, ep.apiKey);
     let status: TierHealth;
     if (!result.reachable) status = "down";
-    else if (result.httpStatus !== undefined && (result.httpStatus < 200 || result.httpStatus >= 300)) status = "unknown";
+    // A non-2xx (404/5xx/401) means the endpoint is not serving: RunPod and
+    // similar proxies return 404 for every path when the pod is stopped. A tier
+    // whose provider does not expose /models sets `probe: false` to opt out.
+    else if (result.httpStatus !== undefined && (result.httpStatus < 200 || result.httpStatus >= 300)) status = "down";
     else if (result.modelIds && !result.modelIds.has(modelId)) status = "down";
     else status = "up";
     healthCache.set(model, { at: now(), status });

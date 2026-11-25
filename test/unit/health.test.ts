@@ -62,6 +62,15 @@ describe("createHealthResolver — tierHealth", () => {
     expect(await r.tierHealth("pod/Groot-19B")).toBe("down");
   });
 
+  it("is down on a non-2xx response (a stopped pod proxy answers 404 for every path)", async () => {
+    const r = createHealthResolver({
+      cfg: cfgWith({ enabled: true }),
+      listProviders: async () => endpoints,
+      fetchImpl: (async () => ({ ok: false, status: 404, json: async () => ({}) }) as unknown as Response) as unknown as typeof fetch,
+    });
+    expect(await r.tierHealth("pod/Groot-19B")).toBe("down");
+  });
+
   it("is unknown (treated up) when the provider has no baseURL", async () => {
     const r = resolver({ enabled: true }, ["Groot-19B"]);
     expect(await r.tierHealth("remote/anything")).toBe("unknown");
