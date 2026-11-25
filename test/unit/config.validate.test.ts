@@ -85,6 +85,25 @@ describe("validateConfig — happy path", () => {
     );
     expect(cfg.tierCaps?.fast).toBe(3);
   });
+
+  it("leaves healthCheck undefined when absent, and normalizes a valid block", () => {
+    expect(validateConfig(validRaw()).healthCheck).toBeUndefined();
+    const cfg = validateConfig(
+      validRaw({ healthCheck: { enabled: true, ttlMs: 30_000, timeoutMs: 1200, probe: { heavy: false } } }),
+    );
+    expect(cfg.healthCheck).toEqual({ enabled: true, ttlMs: 30_000, timeoutMs: 1200, probe: { heavy: false } });
+  });
+
+  it.each([
+    ["enabled not a boolean", { healthCheck: { enabled: "yes" } }],
+    ["ttlMs not positive", { healthCheck: { ttlMs: 0 } }],
+    ["timeoutMs not a number", { healthCheck: { timeoutMs: "x" } }],
+    ["probe not an object", { healthCheck: { probe: [] } }],
+    ["probe value not a boolean", { healthCheck: { probe: { fast: 1 } } }],
+    ["block not an object", { healthCheck: true }],
+  ])("rejects healthCheck: %s", (_label, extra) => {
+    expect(() => validateConfig(validRaw(extra))).toThrow(/healthCheck/);
+  });
 });
 
 describe("validateConfig — root shape", () => {

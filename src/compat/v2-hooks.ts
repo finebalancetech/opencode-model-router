@@ -9,8 +9,9 @@ import { V2_GRADER_AGENT } from "./v2-client";
 import { DEPTH_BANNER, SESSION_DIRECTORY, TASK_VERIFICATION } from "./child-session";
 import { realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, posix, resolve, win32 } from "node:path";
-import { loadConfig, resolveRolesRouting } from "../router/config";
+import { loadConfig, resolveRolesRouting, resolveCandidates } from "../router/config";
 import { getActiveTiers } from "../router/protocol";
+import { createHealthResolver, type HealthResolver } from "../router/health";
 import { DEFER_MISSING_SUBAGENT_NOTICE, HOST_SEED_AGENTS, resolveSubagentOverrides } from "../router/subagents";
 import { warnAgentOptionsEffortOnce } from "../router/agent-options";
 import { pluginAgentMarker } from "../router/plugin-agents";
@@ -1981,6 +1982,33 @@ export async function registerV2Hooks(
   const startRouting = resolveRouting(loadConfig(ctx.location.directory), "v2", ingestLogger);
   const outcomesDir = resolveOutcomesDir(startRouting.outcomes.path, { tmpdir: tmpdir(), homedir: homedir() });
   const nowMs = (): number => Date.now();
+  // Opt-in endpoint health preflight (src/router/health.ts). Created once; the
+  // provider list and each probe are TTL-cached inside it, so a dispatch does at
+  // most one host call + one probe per window. Inert unless healthCheck.enabled.
+  let healthResolver: HealthResolver | undefined;
+  const getHealthResolver = (cfg: RouterConfig): HealthResolver | undefined => {
+    if (cfg.healthCheck?.enabled !== true) return undefined;
+    if (healthResolver === undefined) {
+      healthResolver = createHealthResolver({
+        cfg,
+        listProviders: async () => {
+          const location = { directory: ctx.location.directory };
+          const listed = await ctx.provider.list({ location });
+          return listed.data.map((p) => {
+            const settings = (p.settings ?? {}) as { baseURL?: unknown; apiKey?: unknown };
+            return {
+              providerId: p.id,
+              baseURL: typeof settings.baseURL === "string" ? settings.baseURL : undefined,
+              apiKey: typeof settings.apiKey === "string" ? settings.apiKey : undefined,
+            };
+          });
+        },
+        now: nowMs,
+        log: (message) => ingestLogger.warn(message),
+      });
+    }
+    return healthResolver;
+  };
   /** Memo §4.1 step 3: the pending journal reload is awaited at most this long before the context hook registers (fail closed after, §12). */
   const PENDING_RELOAD_BOUND_MS = 5_000;
   /** Disposers run by `cleanup` (timers, shared registries, installed filters), in reverse order. */
@@ -3598,6 +3626,26 @@ export async function registerV2Hooks(
               const consumed = consumeAuthority(resumeID, deps, resume);
               if (consumed.status === "dropped") annotateSubagentResult("authority", resumeID, `[router] ${consumed.reason}.`);
             };
+          }
+        }
+        // Opt-in endpoint health preflight: if the requested tier's provider is
+        // unreachable (GPU pod down), escalate the dispatch to the next tier up
+        // before routing runs. Roles and `probe:false` tiers are left untouched.
+        const health = getHealthResolver(cfg);
+        if (health !== undefined && !roles.has(args.agent) && args.sessionID === undefined) {
+          const tiers = getActiveTiers(cfg);
+          const ladder = Object.keys(tiers).filter((name) => tiers[name] != null);
+          if (ladder.includes(args.agent)) {
+            const resolved = await health.resolveTier(
+              args.agent,
+              ladder,
+              (tier) => resolveCandidates(tier, cfg).map((rung) => rung.model),
+            );
+            if (resolved.changed) {
+              args.agent = resolved.tier;
+              args.subagent_type = resolved.tier;
+              delete args.model; // let routing fill the escalated tier's model
+            }
           }
         }
         const routed = await dispatchRouter.route({

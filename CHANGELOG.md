@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **OpenCode v2: opt-in endpoint health preflight with upward tier escalation (`healthCheck`).** When enabled, before a
+  tier subagent is dispatched the router probes the tier model's provider `/models` endpoint (OpenAI-compatible,
+  TTL-cached) and, if the endpoint is unreachable or the model id is absent, escalates the dispatch to the next tier up
+  (`fast`→`medium`→`heavy`). A tier set to `probe: false` is treated as always-up and stops the walk (e.g. a remote
+  floor tier). Inert unless `healthCheck.enabled` is `true`; a provider without a baseURL is never probed. Config:
+  `healthCheck: { enabled, ttlMs (default 45000), timeoutMs (default 1500), probe: { <tier>: boolean } }`.
+
 ### Changed
 
 - **OpenCode v2: plans in different repositories can run at the same time in one Claude Code process.** Executor

@@ -149,6 +149,29 @@ export interface FallbackConfig {
   presets?: Record<string, Record<string, string[]>>;
 }
 
+/**
+ * Opt-in endpoint health preflight (v2 only). When enabled, before a tier
+ * subagent is dispatched the router probes the tier model's provider
+ * `/models` endpoint (TTL-cached) and, if it is unreachable or the model is
+ * absent, escalates the dispatch to the next tier up (fast→medium→heavy).
+ * Absent or `{ enabled: false }` ⇒ inert, no probe, today's behaviour.
+ */
+export interface HealthCheckConfig {
+  /** Master switch. Default false (inert). */
+  enabled?: boolean;
+  /** TTL of a provider health result, ms. Default 45000. */
+  ttlMs?: number;
+  /** Per-probe request timeout, ms. Default 1500. */
+  timeoutMs?: number;
+  /**
+   * Per-tier opt-out: a tier set to `false` is never probed and never
+   * escalated away from (treated as always-up — e.g. a remote floor tier).
+   * A tier set to `true` is probed even if it would otherwise be skipped.
+   * Absent tier ⇒ probed (when enabled).
+   */
+  probe?: Record<string, boolean>;
+}
+
 export interface ModeConfig {
   defaultTier: string;
   description: string;
@@ -477,6 +500,8 @@ export interface RouterConfig {
   experimental?: { verifiedDelegateTool?: boolean };
   /** Cost-aware routing engine (#74). Absent = today's static routing, byte for byte. */
   routing?: RoutingConfig;
+  /** Opt-in endpoint health preflight with upward tier escalation (v2 only). Absent/disabled = inert. */
+  healthCheck?: HealthCheckConfig;
 }
 
 export interface RouterState {
@@ -1171,6 +1196,53 @@ function describeRoutingValue(value: unknown, path: string): string {
 }
 
 /** Copy without invoking accessors again; include defined get-only Proxy values. */
+/**
+ * Validate the opt-in `healthCheck` block. Returns a normalized copy (only the
+ * known keys) or undefined when absent. Throws on a wrong-typed value, like the
+ * enforcement validators, so a bad block is caught at load.
+ */
+function validateHealthCheck(value: unknown): HealthCheckConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) {
+    throw new Error("tiers.json: healthCheck must be an object");
+  }
+  rejectPrototypeKeys(value, "healthCheck");
+  const out: HealthCheckConfig = {};
+  if (value.enabled !== undefined) {
+    if (typeof value.enabled !== "boolean") {
+      throw new Error(`tiers.json: healthCheck.enabled must be a boolean (got ${describeValue(value.enabled)})`);
+    }
+    out.enabled = value.enabled;
+  }
+  if (value.ttlMs !== undefined) {
+    if (typeof value.ttlMs !== "number" || !Number.isFinite(value.ttlMs) || value.ttlMs <= 0) {
+      throw new Error(`tiers.json: healthCheck.ttlMs must be a number > 0 (got ${describeValue(value.ttlMs)})`);
+    }
+    out.ttlMs = value.ttlMs;
+  }
+  if (value.timeoutMs !== undefined) {
+    if (typeof value.timeoutMs !== "number" || !Number.isFinite(value.timeoutMs) || value.timeoutMs <= 0) {
+      throw new Error(`tiers.json: healthCheck.timeoutMs must be a number > 0 (got ${describeValue(value.timeoutMs)})`);
+    }
+    out.timeoutMs = value.timeoutMs;
+  }
+  if (value.probe !== undefined) {
+    if (!isPlainObject(value.probe)) {
+      throw new Error(`tiers.json: healthCheck.probe must be an object of tier -> boolean (got ${describeValue(value.probe)})`);
+    }
+    rejectPrototypeKeys(value.probe, "healthCheck.probe");
+    const probe: Record<string, boolean> = {};
+    for (const [tier, flag] of Object.entries(value.probe)) {
+      if (typeof flag !== "boolean") {
+        throw new Error(`tiers.json: healthCheck.probe.${tier} must be a boolean (got ${describeValue(flag)})`);
+      }
+      probe[tier] = flag;
+    }
+    out.probe = probe;
+  }
+  return out;
+}
+
 function withValidatedSnapshots<T extends object>(
   obj: T,
   snapshots: Record<string, unknown>,
@@ -2527,11 +2599,12 @@ export function validateConfig(raw: unknown): RouterConfig {
   validateTaskPromptRepair(obj);
   validateFalseRefusalDetection(obj);
   const routing = validateRouting(obj.routing);
+  const healthCheck = validateHealthCheck(obj.healthCheck);
   // Never throws: a bad entry is dropped, and buildConfig reports it as a notice.
   const roleAgents = sanitizeRoleAgents(obj.roleAgents).value;
 
   const cfg = raw as RouterConfig;
-  return withValidatedSnapshots(cfg, { enforcement, routing, roleAgents });
+  return withValidatedSnapshots(cfg, { enforcement, routing, roleAgents, healthCheck });
 }
 
 /**
