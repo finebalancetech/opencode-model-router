@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { registerV2Hooks } from "../../src/compat/v2-hooks";
 import ModelRouterPlugin from "../../src/index";
 import { invalidateConfigCache, overridePath } from "../../src/router/config";
+import { rememberDispatch, resetDispatchRegistry } from "../../src/router/sessions";
 import type { RouterPluginInput } from "../../src/compat/child-session";
 
 const GROOT = "custom-gpu/groot-19b";
@@ -54,6 +55,8 @@ const OVERRIDE = {
 };
 
 /** The gateway answers /models without the box: the tier's model is gone, the endpoint is up. */
+
+/** The gateway answers /models without the box: the tier's model is gone, the endpoint is up. */
 function gatewayWithoutGroot() {
   return vi.fn(async () => ({
     ok: true,
@@ -62,9 +65,9 @@ function gatewayWithoutGroot() {
   } as unknown as Response)) as unknown as typeof fetch;
 }
 
-async function host(directory: string, fetchImpl: typeof fetch) {
+async function host(directory: string, fetchImpl: typeof fetch, override: Record<string, unknown> = OVERRIDE) {
   mkdirSync(dirname(overridePath()), { recursive: true });
-  writeFileSync(overridePath(), JSON.stringify(OVERRIDE));
+  writeFileSync(overridePath(), JSON.stringify(override));
   invalidateConfigCache();
   vi.stubGlobal("fetch", fetchImpl);
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -73,7 +76,12 @@ async function host(directory: string, fetchImpl: typeof fetch) {
     : { id: sessionID, parentID: "root", agent: "medium", location: { directory } });
   const toolHooks: Record<string, (event: any) => Promise<void>> = {};
   const none = () => ({ dispose: vi.fn(async () => {}) });
-  const agents: Record<string, any> = { build: { id: "build", mode: "primary", permissions: [], request: { settings: {}, headers: {}, body: {} } } };
+  const agents: Record<string, any> = {
+    build: { id: "build", mode: "primary", permissions: [], request: { settings: {}, headers: {}, body: {} } },
+    fast: { id: "fast", mode: "subagent", model: { providerID: "custom-gpu", id: "groot-19b" }, permissions: [], request: { settings: {}, headers: {}, body: {} } },
+    medium: { id: "medium", mode: "subagent", model: { providerID: "custom-gpu", id: "groot-19b" }, permissions: [], request: { settings: {}, headers: {}, body: {} } },
+    heavy: { id: "heavy", mode: "subagent", model: { providerID: "opencode-go", id: "deepseek-v4.1-flash" }, permissions: [], request: { settings: {}, headers: {}, body: {} } },
+  };
   const ctx = {
     location: { directory, project: { directory } },
     agent: {
@@ -125,6 +133,19 @@ describe("health preflight — a resume runs on the escalated tier's model", () 
     expect(input.model).toBe(DEEPSEEK);
     expect(input.agent).toBe("medium");
     expect(input.sessionID).toBe("child-1");
+  });
+
+  it("the escalation outranks the model a resume in `enforce` restores from the child's record", async () => {
+    // The child was dispatched as @fast and runs as @medium on the box: A30 sends a resume back to where it runs.
+    resetDispatchRegistry();
+    rememberDispatch("child-1", {
+      facts: { class: "ui", risk: "low", scope: "single", needs: [], confidence: 0.5, source: "test" },
+      agent: "medium", model: GROOT, picked: "fast", parentSessionID: "root",
+    });
+    const call = await host(home, gatewayWithoutGroot(), { ...OVERRIDE, routing: { engine: "enforce" } });
+    const input = await call({ agent: "fast", prompt: "continue and finish", sessionID: "child-1" });
+    expect(input.model).toBe(DEEPSEEK);
+    resetDispatchRegistry();
   });
 
   it("a fresh dispatch still escalates its tier instead of pinning a model", async () => {

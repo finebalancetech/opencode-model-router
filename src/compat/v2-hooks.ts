@@ -3637,6 +3637,9 @@ export async function registerV2Hooks(
         // then fills that tier's model); a resume keeps its agent but carries the
         // escalated tier's model for this turn.
         const health = getHealthResolver(cfg);
+        // A model this block chose for a resume: the endpoint said the tier is unreachable, so it outranks what the
+        // router later restores from the child's dispatch record (see the re-assert after `route()`).
+        let healthModel: string | undefined;
         if (health !== undefined && !roles.has(args.agent)) {
           const tiers = getActiveTiers(cfg);
           const ladder = Object.keys(tiers).filter((name) => tiers[name] != null);
@@ -3654,7 +3657,8 @@ export async function registerV2Hooks(
                 delete args.model; // let routing fill the escalated tier's model
               } else {
                 const escalated = resumeModelRef(resolveCandidates(resolved.tier, cfg));
-                if (escalated !== undefined) args.model = escalated;
+                if (escalated !== undefined) { args.model = escalated; healthModel = escalated; }
+                else ingestLogger.warn(`[router] health: @${resolved.tier} has no candidate model to resume on; the turn keeps the child's own`);
               }
             }
           }
@@ -3683,6 +3687,9 @@ export async function registerV2Hooks(
         if (routed.agent !== undefined) { args.agent = routed.agent; args.subagent_type = routed.agent; }
         if (routed.model !== undefined) args.model = routed.model;
         if (args.model === undefined && tierModel !== undefined) args.model = tierModel;
+        // A resume in `enforce` restores the child's own model from its record; when the preflight measured that tier's
+        // endpoint unreachable, the escalated model wins, or the turn goes straight back to the dead box.
+        if (healthModel !== undefined) args.model = healthModel;
       }
       // After routing: the prompt the legacy hook starts from is the one the engine left (a stripped route line is not "added" text).
       try {
