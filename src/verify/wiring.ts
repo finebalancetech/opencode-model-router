@@ -62,6 +62,7 @@ import {
   type VerificationResult,
 } from "./pending";
 import { assessRisk, FULL_SCOPE_PLAN, type FullScopePlan, type RiskAssessment } from "./risk";
+import { getActiveTiers } from "../router/protocol";
 import { resolveBaseDir } from "./paths";
 import { DEFAULT_IDLE_TTL_MS } from "../router/idle-sweep";
 import { gitExecutable, hardeningArgs, workRootGuards } from "../router/git-tools";
@@ -1512,43 +1513,58 @@ export function createVerificationWiring(deps: {
       model === null ? null : `${model.providerID}/${model.modelID}`;
     if (deps.childRunner) {
       const cfg = getConfig();
-      const controller = new AbortController();
-      const model = tierModel(cfg, req.tier);
-      let sid: string | undefined;
-      const preparation = service?.start("service-prep", "grader-startup");
-      try {
-        const answer = await withTimeout(deps.childRunner.run({
-          parentSessionID,
-          cwd: req.cwd,
-          model: model ?? undefined,
-          system: req.system,
-          prompt: req.prompt,
-          signal: controller.signal,
-          ...(service === undefined ? {} : { service, onServiceStart: () => preparation?.end("completed") }),
-          async onCreated(sessionID) {
-            sid = sessionID;
-            graderSessions.add(sessionID);
-            inFlight?.add(sessionID);
-            notifyChildCreated(sessionID, creatorSessionID);
-          },
-        }), graderTimeoutMs(req.tier, cfg.enforcement?.verify?.graderTimeoutMs), "grader prompt");
-        return { sessionID: answer.sessionID, text: answer.text, model: modelRef(model) };
-      } catch (error) {
-        // Service results stay low-cardinality; the schema has no free-text reason field.
+      /**
+       * Opt-in health preflight for the grader (v2), the same escalation a tier dispatch gets: this
+       * call goes through the host's native runner, which fires no plugin tool hook, so nothing else
+       * can catch a tier whose box went away (the gateway answers `no route for model '<id>'`).
+       * Grading is never worth that: walk up the tier ladder and grade on the next tier that answers.
+       * `readOnly`/roles never reach here; the ladder is the active preset's tier order.
+       */
+      const ladder = cfg.healthCheck?.enabled === true ? Object.keys(getActiveTiers(cfg)).filter((name) => getActiveTiers(cfg)[name] != null) : [];
+      const startAt = ladder.indexOf(req.tier);
+      const order = ladder.length === 0 || startAt < 0 ? [req.tier] : ladder.slice(startAt);
+      let lastError: unknown;
+      for (const tier of order) {
+        const controller = new AbortController();
+        const model = tierModel(cfg, tier);
+        let sid: string | undefined;
+        const preparation = service?.start("service-prep", "grader-startup");
         try {
-          const label = graderDispatchLabel === undefined ? "" : ` for ${scrubText(graderDispatchLabel).replace(/\s+/g, " ").trim().slice(0, 200)}`;
-          logger.warn(`[verify] grader dispatch failed${label}: ${errorText(error).replace(/\s+/g, " ").trim().slice(0, 200)}`);
-        } catch { /* Diagnostics must preserve the original dispatch error. */ }
-        throw error;
-      } finally {
-        preparation?.end("error");
-        controller.abort();
-        if (sid) {
-          graderSessions.delete(sid);
-          inFlight?.delete(sid);
-          await disposeChildSession(sid);
+          const answer = await withTimeout(deps.childRunner.run({
+            parentSessionID,
+            cwd: req.cwd,
+            model: model ?? undefined,
+            system: req.system,
+            prompt: req.prompt,
+            signal: controller.signal,
+            ...(service === undefined ? {} : { service, onServiceStart: () => preparation?.end("completed") }),
+            async onCreated(sessionID) {
+              sid = sessionID;
+              graderSessions.add(sessionID);
+              inFlight?.add(sessionID);
+              notifyChildCreated(sessionID, creatorSessionID);
+            },
+          }), graderTimeoutMs(req.tier, cfg.enforcement?.verify?.graderTimeoutMs), "grader prompt");
+          return { sessionID: answer.sessionID, text: answer.text, model: modelRef(model) };
+        } catch (error) {
+          lastError = error;
+          // Service results stay low-cardinality; the schema has no free-text reason field.
+          try {
+            const label = graderDispatchLabel === undefined ? "" : ` for ${scrubText(graderDispatchLabel).replace(/\s+/g, " ").trim().slice(0, 200)}`;
+            const next = order[order.indexOf(tier) + 1];
+            logger.warn(`[verify] grader dispatch failed on @${tier}${next === undefined ? "" : `; escalating to @${next}`}${label}: ${errorText(error).replace(/\s+/g, " ").trim().slice(0, 200)}`);
+          } catch { /* Diagnostics must preserve the original dispatch error. */ }
+        } finally {
+          preparation?.end("error");
+          controller.abort();
+          if (sid) {
+            graderSessions.delete(sid);
+            inFlight?.delete(sid);
+            await disposeChildSession(sid);
+          }
         }
       }
+      throw lastError;
     }
     // Scope the grader session to the producer's working directory when one was
     // declared. Naming the directory in the prompt is not enough: the grader

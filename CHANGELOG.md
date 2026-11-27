@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`no route for model '<id>'`) instead of escalating. The same probe now runs on a resume: the child keeps its agent,
   and the turn carries the escalated tier's model (its first candidate) — the host applies a `model` on a resumed
   `subagent` call.
+- **OpenCode v2: the acceptance grader escalates the same way instead of grading an unreachable tier.** The grader is
+  dispatched through the host's native runner, which fires no plugin tool hook, so a tier whose box had gone away made
+  every verification `unverifiable` (`no route for model '<id>'`). With `healthCheck.enabled`, a failed grader dispatch
+  now walks up the active preset's tier ladder and grades on the next tier that answers; the verdict records the model
+  actually used. Without `healthCheck` the behaviour is unchanged.
 
 ### Changed
 

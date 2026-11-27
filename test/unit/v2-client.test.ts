@@ -469,6 +469,52 @@ describe("native v2 child runner", () => {
     expect(context.session.interrupt).toHaveBeenCalledWith({ sessionID: "child" });
   });
 
+  it("health preflight: a grader tier whose provider fails is graded on the next tier up (opt-in)", async () => {
+    const { runtime, context, toolContext, execute } = fixture();
+    const cfg = {
+      activePreset: "p",
+      presets: { p: { fast: { model: "p/fast-m" }, medium: { model: "p/medium-m" }, heavy: { model: "p/heavy-m" } } },
+      healthCheck: { enabled: true },
+    } as unknown as RouterConfig;
+    const wiring = createVerificationWiring({ client: runtime.client, childRunner: runtime.childRunner, directory: "/project", getConfig: () => cfg });
+    const dispatched: unknown[] = [];
+    execute.mockImplementation(async (input: unknown, ctx: ToolContext) => {
+      const model = (input as { model?: unknown }).model;
+      dispatched.push(model);
+      if (model === "p/medium-m") throw new Error("no route for model 'groot-19b'");
+      await ctx.progress({ sessionID: "child", status: "running" });
+      return { output: { sessionID: "child", status: "completed", output: "verified result" } };
+    });
+    try {
+      await expect(runtime.withToolContext(toolContext, () => wiring.dispatchGrader({
+        tier: "medium", system: "Judge the changes", prompt: "inspect",
+      }, "parent"))).resolves.toEqual({ sessionID: "child", text: "verified result", model: "p/heavy-m" });
+      expect(dispatched).toEqual(["p/medium-m", "p/heavy-m"]);
+      // The failed attempt's session is disposed before the next tier runs.
+      expect(context.session.remove).toHaveBeenCalledWith({ sessionID: "child" });
+    } finally { await wiring.disposeVerification(); }
+  });
+
+  it("health preflight: without healthCheck the grader fails on its tier, as before", async () => {
+    const { runtime, toolContext, execute } = fixture();
+    const cfg = {
+      activePreset: "p",
+      presets: { p: { fast: { model: "p/fast-m" }, medium: { model: "p/medium-m" }, heavy: { model: "p/heavy-m" } } },
+    } as unknown as RouterConfig;
+    const wiring = createVerificationWiring({ client: runtime.client, childRunner: runtime.childRunner, directory: "/project", getConfig: () => cfg });
+    const dispatched: unknown[] = [];
+    execute.mockImplementation(async (input: unknown) => {
+      dispatched.push((input as { model?: unknown }).model);
+      throw new Error("no route for model 'groot-19b'");
+    });
+    try {
+      await expect(runtime.withToolContext(toolContext, () => wiring.dispatchGrader({
+        tier: "medium", system: "s", prompt: "p",
+      }, "parent"))).rejects.toThrow("no route for model");
+      expect(dispatched).toEqual(["p/medium-m"]);
+    } finally { await wiring.disposeVerification(); }
+  });
+
   it("registers grader identity before model requests and always disposes the real session", async () => {
     const { runtime, context, toolContext, execute } = fixture();
     const cfg = { activePreset: "p", presets: { p: { medium: { model: "p/model", description: "", whenToUse: [] } } }, rules: [], defaultTier: "medium" } as RouterConfig;
