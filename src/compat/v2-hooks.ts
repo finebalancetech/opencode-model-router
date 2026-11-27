@@ -11,7 +11,7 @@ import { realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { loadConfig, resolveRolesRouting, resolveCandidates } from "../router/config";
 import { getActiveTiers } from "../router/protocol";
-import { createHealthResolver, type HealthResolver } from "../router/health";
+import { createHealthResolver, resumeModelRef, type HealthResolver } from "../router/health";
 import { DEFER_MISSING_SUBAGENT_NOTICE, HOST_SEED_AGENTS, resolveSubagentOverrides } from "../router/subagents";
 import { warnAgentOptionsEffortOnce } from "../router/agent-options";
 import { pluginAgentMarker } from "../router/plugin-agents";
@@ -3631,10 +3631,16 @@ export async function registerV2Hooks(
         // Opt-in endpoint health preflight: if the requested tier's provider is
         // unreachable (GPU pod down), escalate the dispatch to the next tier up
         // before routing runs. Roles and `probe:false` tiers are left untouched.
+        // A resume is covered too: the resumed child keeps the model it was pinned
+        // to when it was created, so a tier whose box went away would otherwise
+        // abort the resumed turn. A fresh dispatch escalates its tier (routing
+        // then fills that tier's model); a resume keeps its agent but carries the
+        // escalated tier's model for this turn.
         const health = getHealthResolver(cfg);
-        if (health !== undefined && !roles.has(args.agent) && args.sessionID === undefined) {
+        if (health !== undefined && !roles.has(args.agent)) {
           const tiers = getActiveTiers(cfg);
           const ladder = Object.keys(tiers).filter((name) => tiers[name] != null);
+          const resumed = typeof args.sessionID === "string" && args.sessionID !== "";
           if (ladder.includes(args.agent)) {
             const resolved = await health.resolveTier(
               args.agent,
@@ -3642,9 +3648,14 @@ export async function registerV2Hooks(
               (tier) => resolveCandidates(tier, cfg).map((rung) => rung.model),
             );
             if (resolved.changed) {
-              args.agent = resolved.tier;
-              args.subagent_type = resolved.tier;
-              delete args.model; // let routing fill the escalated tier's model
+              if (!resumed) {
+                args.agent = resolved.tier;
+                args.subagent_type = resolved.tier;
+                delete args.model; // let routing fill the escalated tier's model
+              } else {
+                const escalated = resumeModelRef(resolveCandidates(resolved.tier, cfg));
+                if (escalated !== undefined) args.model = escalated;
+              }
             }
           }
         }

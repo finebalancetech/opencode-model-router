@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`fast`→`medium`→`heavy`). A tier set to `probe: false` is treated as always-up and stops the walk (e.g. a remote
   floor tier). Inert unless `healthCheck.enabled` is `true`; a provider without a baseURL is never probed. Config:
   `healthCheck: { enabled, ttlMs (default 45000), timeoutMs (default 1500), probe: { <tier>: boolean } }`.
+- **OpenCode v2: the endpoint health preflight also covers a resume.** A tier subagent keeps the model it was pinned to
+  when it was created, so resuming it after its box went away used to end the turn at the provider
+  (`no route for model '<id>'`) instead of escalating. The same probe now runs on a resume: the child keeps its agent,
+  and the turn carries the escalated tier's model (its first candidate) — the host applies a `model` on a resumed
+  `subagent` call.
 
 ### Changed
 

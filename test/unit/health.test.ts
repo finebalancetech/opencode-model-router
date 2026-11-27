@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createHealthResolver, splitModelRef, type ProviderEndpoint } from "../../src/router/health";
+import { createHealthResolver, resumeModelRef, splitModelRef, type ProviderEndpoint } from "../../src/router/health";
 import type { RouterConfig } from "../../src/router/config";
 
 /** Minimal cfg with the healthCheck block under test. */
@@ -130,5 +130,16 @@ describe("createHealthResolver — TTL cache", () => {
     t += 10_001;
     expect(await r.tierHealth("pod/groot")).toBe("up");
     expect(calls).toBe(2); // re-probed after TTL
+  });
+});
+describe("resumeModelRef", () => {
+  it("carries the escalated tier's first candidate, with a variant only when it says one", () => {
+    expect(resumeModelRef([{ model: "custom-gpu/groot-19b" }])).toBe("custom-gpu/groot-19b");
+    expect(resumeModelRef([{ model: "opencode-go/deepseek-v4.1-flash", variant: "high" }])).toBe("opencode-go/deepseek-v4.1-flash#high");
+    expect(resumeModelRef([{ model: "a/b", variant: "default" }, { model: "c/d" }])).toBe("a/b");
+  });
+
+  it("says nothing for a tier with no candidate", () => {
+    expect(resumeModelRef([])).toBeUndefined();
   });
 });

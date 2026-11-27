@@ -46,6 +46,19 @@ export function splitModelRef(model: string): { providerId: string; modelId: str
   return i < 0 ? { providerId: "", modelId: model } : { providerId: model.slice(0, i), modelId: model.slice(i + 1) };
 }
 
+/**
+ * The model ref a resume carries when its tier escalated: the escalated tier's first candidate as
+ * `provider/model[#variant]` (`""`/`"default"` variants say nothing, as in the dispatch refs).
+ */
+export function resumeModelRef(
+  candidates: readonly { readonly model: string; readonly variant?: string }[],
+): string | undefined {
+  const first = candidates[0];
+  if (first === undefined) return undefined;
+  const variant = first.variant;
+  return variant === undefined || variant === "" || variant === "default" ? first.model : `${first.model}#${variant}`;
+}
+
 export interface HealthResolver {
   /** Health of a tier's primary model: "down" on a refused/timeout probe, a non-2xx response, or an absent model id. */
   tierHealth(model: string): Promise<TierHealth>;
